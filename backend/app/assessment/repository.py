@@ -1,6 +1,6 @@
 """首次登录问卷的 SQLAlchemy 数据访问。"""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from app.models.assessment import (
     AssessmentSubmission,
     AssessmentTemplate,
 )
+from app.models.assessment_review import AssessmentReview
 
 
 class SqlAlchemyAssessmentRepository:
@@ -28,6 +29,60 @@ class SqlAlchemyAssessmentRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def get_template(self, template_id: str) -> AssessmentTemplate | None:
+        result = await self.session.execute(
+            select(AssessmentTemplate).where(AssessmentTemplate.id == template_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def create_review(
+        self,
+        template: AssessmentTemplate,
+        reviewer_user_id: str,
+        review_status: str,
+        now: datetime,
+    ) -> AssessmentReview:
+        review = AssessmentReview(
+            template_id=template.id,
+            reviewer_user_id=reviewer_user_id,
+            status=review_status,
+            rule_version=template.rule_version,
+            reviewed_at=now,
+            created_at=now,
+        )
+        self.session.add(review)
+        await self.session.flush()
+        await self.session.refresh(review)
+        return review
+
+    async def get_latest_review(self, template_id: str) -> AssessmentReview | None:
+        result = await self.session.execute(
+            select(AssessmentReview)
+            .where(AssessmentReview.template_id == template_id)
+            .order_by(AssessmentReview.reviewed_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def publish_template(
+        self, template: AssessmentTemplate, publisher_user_id: str
+    ) -> AssessmentTemplate:
+        siblings = await self.session.execute(
+            select(AssessmentTemplate).where(
+                AssessmentTemplate.code == template.code,
+                AssessmentTemplate.id != template.id,
+            )
+        )
+        for sibling in siblings.scalars().all():
+            sibling.status = "unpublished"
+            sibling.published_at = None
+        template.status = "published"
+        template.published_by_user_id = publisher_user_id
+        template.published_at = datetime.now(UTC)
+        await self.session.flush()
+        await self.session.refresh(template)
+        return template
 
     async def get_template_for_submission(self, submission: AssessmentSubmission) -> AssessmentTemplate:
         result = await self.session.execute(
@@ -185,6 +240,28 @@ class SqlAlchemyAssessmentRepository:
             )
         )
         return list(result.scalars().all())
+
+    async def get_fact_candidate(
+        self, user_id: str, submission_id: str, candidate_id: str
+    ) -> AssessmentFactCandidate | None:
+        result = await self.session.execute(
+            select(AssessmentFactCandidate).where(
+                AssessmentFactCandidate.id == candidate_id,
+                AssessmentFactCandidate.user_id == user_id,
+                AssessmentFactCandidate.submission_id == submission_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def mark_candidate_confirmed(
+        self, candidate: AssessmentFactCandidate, health_fact_id: str, now: datetime
+    ) -> AssessmentFactCandidate:
+        candidate.status = "confirmed"
+        candidate.health_fact_id = health_fact_id
+        candidate.updated_at = now
+        await self.session.flush()
+        await self.session.refresh(candidate)
+        return candidate
 
     async def commit(self) -> None:
         await self.session.commit()

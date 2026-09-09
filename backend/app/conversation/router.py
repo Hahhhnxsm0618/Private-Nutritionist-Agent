@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.router import get_current_user
@@ -112,6 +113,55 @@ async def create_user_message(
             request,
             request_id or str(uuid4()),
         )
+    except ConversationNotFoundError as error:
+        raise resource_not_found() from error
+    except ConversationArchivedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "CONVERSATION_ARCHIVED", "message": "会话已归档，不能继续发送消息"},
+        ) from error
+
+
+@router.post(
+    "/{conversation_id}/retry",
+    response_model=MessageTurnResponse,
+)
+async def retry_user_message(
+    conversation_id: str,
+    message_id: str,
+    request_id: str | None = Header(default=None, alias="X-Request-ID"),
+    user=Depends(get_current_user),
+    service: ConversationService = Depends(get_conversation_service),
+) -> MessageTurnResponse:
+    try:
+        return await service.retry_user_message(
+            user.id, conversation_id, message_id, request_id or str(uuid4())
+        )
+    except ConversationNotFoundError as error:
+        raise resource_not_found() from error
+    except ConversationArchivedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "CONVERSATION_ARCHIVED", "message": "会话已归档，不能重试消息"},
+        ) from error
+
+
+@router.post(
+    "/{conversation_id}/messages/stream",
+    response_class=StreamingResponse,
+)
+async def stream_user_message(
+    conversation_id: str,
+    request: MessageCreate,
+    request_id: str | None = Header(default=None, alias="X-Request-ID"),
+    user=Depends(get_current_user),
+    service: ConversationService = Depends(get_conversation_service),
+) -> StreamingResponse:
+    try:
+        stream = service.stream_user_message(
+            user.id, conversation_id, request, request_id or str(uuid4())
+        )
+        return StreamingResponse(stream, media_type="text/event-stream")
     except ConversationNotFoundError as error:
         raise resource_not_found() from error
     except ConversationArchivedError as error:

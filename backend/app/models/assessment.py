@@ -25,6 +25,9 @@ class AssessmentTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     target_population: Mapped[str] = mapped_column(String(64), nullable=False)
     rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    published_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), index=True
+    )
     questions: Mapped[list["AssessmentQuestion"]] = relationship(back_populates="template")
     submissions: Mapped[list["AssessmentSubmission"]] = relationship(back_populates="template")
 
@@ -118,5 +121,6 @@ class AssessmentFactCandidate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     sensitivity: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     consent_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    health_fact_id: Mapped[str | None] = mapped_column(ForeignKey("health_facts.id"), index=True)
 
     submission: Mapped[AssessmentSubmission] = relationship(back_populates="fact_candidates")

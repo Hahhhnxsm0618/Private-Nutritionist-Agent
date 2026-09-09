@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
     "assessment_submissions",
     "assessment_answers",
     "assessment_fact_candidates",
+    "assessment_reviews",
 }
 
 
@@ -26,7 +27,7 @@ def test_foundation_metadata_contains_expected_tables() -> None:
 
 def test_user_owned_tables_have_user_id_and_primary_keys_are_strings() -> None:
     """除用户主表外，业务数据都必须能按 user_id 做隔离。"""
-    global_tables = {"assessment_templates", "assessment_questions"}
+    global_tables = {"assessment_templates", "assessment_questions", "assessment_reviews"}
     for table_name in EXPECTED_TABLES - {"users"} - global_tables:
         table = Base.metadata.tables[table_name]
         assert "user_id" in table.columns
@@ -85,8 +86,26 @@ def test_assessment_tables_keep_answers_and_candidates_separate() -> None:
     assert {"user_id", "submission_id", "question_id", "answer_json", "answer_status"} <= set(
         answers.columns.keys()
     )
-    assert {"user_id", "submission_id", "fact_type", "value_json", "status"} <= set(
+    assert {"user_id", "submission_id", "fact_type", "value_json", "status", "health_fact_id"} <= set(
         candidates.columns.keys()
     )
     assert "content" not in answers.columns
     assert "content" not in candidates.columns
+
+
+def test_assessment_reviews_record_professional_decision_without_raw_content() -> None:
+    reviews = Base.metadata.tables["assessment_reviews"]
+
+    assert {
+        "published_by_user_id",
+    } <= set(Base.metadata.tables["assessment_templates"].columns.keys())
+
+    assert {
+        "template_id",
+        "reviewer_user_id",
+        "status",
+        "rule_version",
+        "reviewed_at",
+        "created_at",
+    } <= set(reviews.columns.keys())
+    assert "raw_text" not in reviews.columns

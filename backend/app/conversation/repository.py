@@ -48,6 +48,30 @@ class SqlAlchemyConversationRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_message(
+        self, user_id: str, conversation_id: str, message_id: str
+    ) -> Message | None:
+        result = await self.session.execute(
+            select(Message).where(
+                Message.id == message_id,
+                Message.user_id == user_id,
+                Message.conversation_id == conversation_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_messages_by_request_id(
+        self, user_id: str, conversation_id: str, request_id: str
+    ) -> list[Message]:
+        result = await self.session.execute(
+            select(Message).where(
+                Message.user_id == user_id,
+                Message.conversation_id == conversation_id,
+                Message.request_id == request_id,
+            )
+        )
+        return list(result.scalars().all())
+
     async def archive_conversation(self, conversation: Conversation, now: datetime) -> Conversation:
         conversation.status = "archived"
         conversation.updated_at = now
@@ -86,6 +110,22 @@ class SqlAlchemyConversationRepository:
             created_at=now,
         )
         self.session.add(message)
+        await self.session.flush()
+        await self.session.refresh(message)
+        return message
+
+    async def update_message_content(
+        self, message: Message, content: str, status: str | None = None
+    ) -> Message:
+        message.content = content
+        if status is not None:
+            message.status = status
+        await self.session.flush()
+        await self.session.refresh(message)
+        return message
+
+    async def update_message_status(self, message: Message, status: str) -> Message:
+        message.status = status
         await self.session.flush()
         await self.session.refresh(message)
         return message

@@ -26,6 +26,7 @@ def test_initial_migration_contains_all_foundation_tables() -> None:
         "assessment_submissions",
         "assessment_answers",
         "assessment_fact_candidates",
+        "assessment_reviews",
     }
     for table_name in foundation_tables:
         assert f"'{table_name}'" in migration
@@ -63,3 +64,58 @@ def test_assessment_incremental_migration_exists() -> None:
         "assessment_fact_candidates",
     ):
         assert f'"{table_name}"' in migration
+
+
+def test_assessment_question_seed_is_draft_until_professional_review() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0004_seed_assessment_quick_draft.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0004_assessment_quick_draft"' in migration
+    assert 'status": "draft"' in migration
+    assert '"assessment-rules-v1"' in migration
+    assert '"diet_structure"' in migration
+    assert '"goal_feasibility"' in migration
+
+
+def test_assessment_candidate_confirmation_migration_exists() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0005_add_assessment_candidate_fact_link.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0005_candidate_fact_link"' in migration
+    assert 'down_revision: str | Sequence[str] | None = "0004_assessment_quick_draft"' in migration
+    assert '"health_fact_id"' in migration
+
+
+def test_assessment_review_migration_exists() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0006_add_assessment_reviews.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0006_assessment_reviews"' in migration
+    assert 'down_revision: str | Sequence[str] | None = "0005_candidate_fact_link"' in migration
+    assert '"assessment_reviews"' in migration
+
+
+def test_assessment_publication_audit_migration_exists() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0007_add_assessment_publication_audit.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0007_publish_audit"' in migration
+    assert 'down_revision: str | Sequence[str] | None = "0006_assessment_reviews"' in migration
+    assert '"published_by_user_id"' in migration
+    assert len("0007_publish_audit") <= 32

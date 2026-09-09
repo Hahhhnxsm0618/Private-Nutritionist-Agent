@@ -14,6 +14,7 @@ from app.assessment.schemas import (
 from app.assessment.service import AssessmentNotFoundError
 from app.auth.router import get_current_user
 from app.main import app
+from app.profile.schemas import HealthFactResponse
 
 NOW = datetime.now(UTC)
 
@@ -41,6 +42,32 @@ class StubAssessmentService:
             active_submission_id=None,
             available_tiers=["quick", "standard", "full"],
         )
+
+    async def publish_template(self, template_id, publisher_user_id):
+        assert publisher_user_id == "admin-1"
+        return {
+            "id": template_id,
+            "code": "onboarding",
+            "version": "quick-draft-v1",
+            "status": "published",
+            "target_population": "adult_general",
+            "rule_version": "assessment-rules-v1",
+            "published_at": NOW,
+            "published_by_user_id": publisher_user_id,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+
+    async def review_template(self, template_id, reviewer_user_id, request):
+        return {
+            "id": "review-1",
+            "template_id": template_id,
+            "reviewer_user_id": reviewer_user_id,
+            "status": request.status,
+            "rule_version": "assessment-rules-v1",
+            "reviewed_at": NOW,
+            "created_at": NOW,
+        }
 
     async def create_submission(self, user_id, request):
         assert user_id == "user-1"
@@ -96,6 +123,23 @@ class StubAssessmentService:
             raise AssessmentNotFoundError
         return await self.complete_submission(user_id, submission_id)
 
+    async def confirm_fact_candidate(self, user_id, submission_id, candidate_id):
+        if user_id != "user-1":
+            raise AssessmentNotFoundError
+        return HealthFactResponse(
+            id="fact-1",
+            user_id=user_id,
+            fact_type="goal",
+            value={"value": "ready"},
+            source_type="assessment",
+            source_message_id=None,
+            status="pending",
+            consent_id="consent-1",
+            valid_until=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
 
 def test_assessment_api_uses_authenticated_user_and_returns_core_flow() -> None:
     app.dependency_overrides[get_assessment_service] = lambda: StubAssessmentService()
@@ -111,6 +155,9 @@ def test_assessment_api_uses_authenticated_user_and_returns_core_flow() -> None:
             json={"value": "ready"},
         )
         completed = client.post("/api/v1/assessments/submissions/submission-1/complete")
+        confirmed = client.post(
+            "/api/v1/assessments/submissions/submission-1/fact-candidates/candidate-1/confirm"
+        )
 
         assert state.status_code == 200
         assert created.status_code == 201
@@ -118,6 +165,8 @@ def test_assessment_api_uses_authenticated_user_and_returns_core_flow() -> None:
         assert answer.status_code == 200
         assert completed.status_code == 200
         assert completed.json()["submission"]["status"] == "completed_quick"
+        assert confirmed.status_code == 200
+        assert confirmed.json()["source_type"] == "assessment"
     finally:
         app.dependency_overrides.clear()
 
@@ -131,5 +180,75 @@ def test_assessment_api_maps_cross_user_resource_to_not_found() -> None:
         response = client.get("/api/v1/assessments/submissions/submission-1/result")
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "RESOURCE_NOT_FOUND"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_only_admin_can_publish_assessment_template() -> None:
+    app.dependency_overrides[get_assessment_service] = lambda: StubAssessmentService()
+    app.dependency_overrides[get_current_user] = lambda: type(
+        "User", (), {"id": "admin-1", "role": "admin"}
+    )()
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/v1/assessments/admin/templates/template-1/publish"
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "published"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_non_admin_cannot_publish_assessment_template() -> None:
+    app.dependency_overrides[get_assessment_service] = lambda: StubAssessmentService()
+    app.dependency_overrides[get_current_user] = lambda: type(
+        "User", (), {"id": "user-1", "role": "user"}
+    )()
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/v1/assessments/admin/templates/template-1/publish"
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "FORBIDDEN"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_only_nutritionist_can_review_assessment_template() -> None:
+    app.dependency_overrides[get_assessment_service] = lambda: StubAssessmentService()
+    app.dependency_overrides[get_current_user] = lambda: type(
+        "User", (), {"id": "nutritionist-1", "role": "nutritionist"}
+    )()
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/v1/assessments/templates/template-1/review",
+            json={"status": "approved"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "approved"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_non_nutritionist_cannot_review_assessment_template() -> None:
+    app.dependency_overrides[get_assessment_service] = lambda: StubAssessmentService()
+    app.dependency_overrides[get_current_user] = lambda: type(
+        "User", (), {"id": "admin-1", "role": "admin"}
+    )()
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/v1/assessments/templates/template-1/review",
+            json={"status": "approved"},
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "FORBIDDEN"
     finally:
         app.dependency_overrides.clear()

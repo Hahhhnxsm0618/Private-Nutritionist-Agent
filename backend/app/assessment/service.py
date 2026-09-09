@@ -8,6 +8,7 @@ from app.assessment.schemas import (
     AssessmentCompleteResponse,
     AssessmentOnboardingResponse,
     AssessmentQuestionResponse,
+    AssessmentReviewRequest,
     AssessmentSubmissionCreate,
     AssessmentSubmissionResponse,
 )
@@ -16,6 +17,8 @@ from app.assessment.scoring import (
     AssessmentQuestionForScoring,
     calculate_assessment_result,
 )
+from app.profile.schemas import HealthFactResponse
+from app.profile.service import MemoryDisabledError
 
 
 class AssessmentNotFoundError(Exception):
@@ -28,6 +31,10 @@ class AssessmentValidationError(Exception):
 
 class AssessmentRepository(Protocol):
     async def get_published_template(self, code: str): ...
+    async def get_template(self, template_id: str): ...
+    async def create_review(self, template, reviewer_user_id: str, review_status: str, now: datetime): ...
+    async def get_latest_review(self, template_id: str): ...
+    async def publish_template(self, template, publisher_user_id: str): ...
     async def get_template_for_submission(self, submission): ...
     async def get_submission(self, user_id: str, submission_id: str): ...
     async def get_draft_submission(self, user_id: str, template_id: str): ...
@@ -40,6 +47,8 @@ class AssessmentRepository(Protocol):
     async def complete_submission(self, submission, result, highest_tier: str, now: datetime): ...
     async def create_fact_candidates(self, user_id: str, submission_id: str, candidates, now: datetime): ...
     async def list_fact_candidates(self, user_id: str, submission_id: str): ...
+    async def get_fact_candidate(self, user_id: str, submission_id: str, candidate_id: str): ...
+    async def mark_candidate_confirmed(self, candidate, health_fact_id: str, now: datetime): ...
     async def commit(self) -> None: ...
 
 
@@ -47,8 +56,9 @@ TIER_ORDER = {"quick": 1, "standard": 2, "full": 3}
 
 
 class AssessmentService:
-    def __init__(self, repository: AssessmentRepository) -> None:
+    def __init__(self, repository: AssessmentRepository, profile_repository=None) -> None:
         self.repository = repository
+        self.profile_repository = profile_repository
 
     async def get_onboarding_state(self, user_id: str) -> AssessmentOnboardingResponse:
         template = await self.repository.get_published_template("onboarding")
@@ -64,6 +74,34 @@ class AssessmentService:
             active_submission_id=draft.id if draft else None,
             available_tiers=["quick", "standard", "full"],
         )
+
+    async def publish_template(self, template_id: str, publisher_user_id: str):
+        template = await self.repository.get_template(template_id)
+        if template is None:
+            raise AssessmentNotFoundError
+        latest_review = await self.repository.get_latest_review(template_id)
+        if latest_review is None or latest_review.status != "approved":
+            raise AssessmentValidationError("professional review required")
+        if template.status != "published":
+            template = await self.repository.publish_template(template, publisher_user_id)
+            await self.repository.commit()
+        return template
+
+    async def review_template(
+        self,
+        template_id: str,
+        reviewer_user_id: str,
+        request: AssessmentReviewRequest | str,
+    ):
+        template = await self.repository.get_template(template_id)
+        if template is None:
+            raise AssessmentNotFoundError
+        review_status = request if isinstance(request, str) else request.status
+        review = await self.repository.create_review(
+            template, reviewer_user_id, review_status, datetime.now(UTC)
+        )
+        await self.repository.commit()
+        return review
 
     async def create_submission(self, user_id: str, request: AssessmentSubmissionCreate):
         template = await self.repository.get_published_template(request.template_code)
@@ -171,6 +209,41 @@ class AssessmentService:
             result=AssessmentScoreResult.model_validate(submission.result_json),
             fact_candidates=candidates,
         )
+
+    async def confirm_fact_candidate(
+        self,
+        user_id: str,
+        submission_id: str,
+        candidate_id: str,
+        consent_type: str = "assessment_fact",
+        policy_version: str = "assessment-v1",
+    ) -> HealthFactResponse:
+        if self.profile_repository is None:
+            raise AssessmentValidationError("profile repository is required")
+        candidate = await self.repository.get_fact_candidate(user_id, submission_id, candidate_id)
+        if candidate is None:
+            raise AssessmentNotFoundError
+        if candidate.status == "confirmed" and candidate.health_fact_id:
+            fact = await self.profile_repository.get_fact(user_id, candidate.health_fact_id)
+            if fact is not None:
+                return HealthFactResponse.model_validate(fact)
+        if candidate.status != "pending":
+            raise AssessmentValidationError("candidate is not confirmable")
+        profile = await self.profile_repository.get_profile(user_id)
+        if profile is not None and not profile.memory_enabled:
+            raise MemoryDisabledError
+        consent = await self.profile_repository.create_consent(
+            user_id, consent_type, policy_version
+        )
+        fact = await self.profile_repository.create_fact(
+            user_id, consent.id, candidate.fact_type, candidate.value_json
+        )
+        await self.repository.mark_candidate_confirmed(
+            candidate, fact.id, datetime.now(UTC)
+        )
+        await self.profile_repository.commit()
+        await self.repository.commit()
+        return HealthFactResponse.model_validate(fact)
 
     async def _get_submission(self, user_id: str, submission_id: str):
         submission = await self.repository.get_submission(user_id, submission_id)

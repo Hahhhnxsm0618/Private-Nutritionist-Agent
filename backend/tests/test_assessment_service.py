@@ -9,6 +9,7 @@ from app.assessment.service import (
     AssessmentService,
     AssessmentValidationError,
 )
+from app.profile.service import MemoryDisabledError
 
 
 class FakeAssessmentRepository:
@@ -54,11 +55,38 @@ class FakeAssessmentRepository:
         self.submissions = {}
         self.answers = {}
         self.candidates = []
+        self.reviews = []
         self.now = now
         self.counter = 0
 
     async def get_published_template(self, code):
         return self.template if code == self.template.code else None
+
+    async def get_template(self, template_id):
+        return self.template if template_id == self.template.id else None
+
+    async def publish_template(self, template, publisher_user_id):
+        template.status = "published"
+        template.published_by_user_id = publisher_user_id
+        template.published_at = datetime.now(UTC)
+        return template
+
+    async def create_review(self, template, reviewer_user_id, review_status, now):
+        review = SimpleNamespace(
+            id=f"review-{len(self.reviews) + 1}",
+            template_id=template.id,
+            reviewer_user_id=reviewer_user_id,
+            status=review_status,
+            rule_version=template.rule_version,
+            reviewed_at=now,
+            created_at=now,
+        )
+        self.reviews.append(review)
+        return review
+
+    async def get_latest_review(self, template_id):
+        reviews = [review for review in self.reviews if review.template_id == template_id]
+        return reviews[-1] if reviews else None
 
     async def get_submission(self, user_id, submission_id):
         submission = self.submissions.get(submission_id)
@@ -154,12 +182,72 @@ class FakeAssessmentRepository:
     async def create_fact_candidates(self, user_id, submission_id, candidates, now):
         stored = []
         for candidate in candidates:
-            stored.append(SimpleNamespace(id=f"candidate-{len(self.candidates) + 1}", **candidate))
+            stored.append(
+                SimpleNamespace(
+                    id=f"candidate-{len(self.candidates) + 1}",
+                    health_fact_id=None,
+                    **candidate,
+                )
+            )
         self.candidates.extend(stored)
         return stored
 
     async def list_fact_candidates(self, user_id, submission_id):
         return [candidate for candidate in self.candidates if candidate.user_id == user_id and candidate.submission_id == submission_id]
+
+    async def get_fact_candidate(self, user_id, submission_id, candidate_id):
+        return next(
+            (
+                candidate
+                for candidate in self.candidates
+                if candidate.id == candidate_id
+                and candidate.user_id == user_id
+                and candidate.submission_id == submission_id
+            ),
+            None,
+        )
+
+    async def mark_candidate_confirmed(self, candidate, health_fact_id, now):
+        candidate.status = "confirmed"
+        candidate.health_fact_id = health_fact_id
+        return candidate
+
+    async def commit(self):
+        return None
+
+
+class FakeProfileRepository:
+    def __init__(self, memory_enabled=True):
+        self.profile = SimpleNamespace(memory_enabled=memory_enabled)
+        self.facts = []
+        self.consent_counter = 0
+
+    async def get_profile(self, user_id):
+        return self.profile
+
+    async def create_consent(self, user_id, consent_type, policy_version):
+        self.consent_counter += 1
+        return SimpleNamespace(id=f"consent-{self.consent_counter}")
+
+    async def create_fact(self, user_id, consent_id, fact_type, value):
+        fact = SimpleNamespace(
+            id=f"fact-{len(self.facts) + 1}",
+            user_id=user_id,
+            fact_type=fact_type,
+            value=value,
+            source_type="assessment",
+            source_message_id=None,
+            status="pending",
+            consent_id=consent_id,
+            valid_until=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self.facts.append(fact)
+        return fact
+
+    async def get_fact(self, user_id, fact_id):
+        return next((fact for fact in self.facts if fact.user_id == user_id and fact.id == fact_id), None)
 
     async def commit(self):
         return None
@@ -238,3 +326,93 @@ async def test_completing_same_submission_twice_does_not_duplicate_candidates(se
 
     assert len(first.fact_candidates) == 1
     assert len(second.fact_candidates) == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_confirmation_creates_pending_health_fact_once():
+    repository = FakeAssessmentRepository()
+    profile_repository = FakeProfileRepository()
+    service = AssessmentService(repository, profile_repository)
+    submission = await service.create_submission("user-1", AssessmentSubmissionCreate())
+    await service.upsert_answer(
+        "user-1", submission.id, "goal", AssessmentAnswerUpsert(value="ready")
+    )
+    result = await service.complete_submission("user-1", submission.id)
+    candidate_id = result.fact_candidates[0].id
+
+    fact = await service.confirm_fact_candidate("user-1", submission.id, candidate_id)
+    repeated = await service.confirm_fact_candidate("user-1", submission.id, candidate_id)
+
+    assert fact.id == repeated.id == "fact-1"
+    assert len(profile_repository.facts) == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_confirmation_respects_disabled_memory():
+    repository = FakeAssessmentRepository()
+    profile_repository = FakeProfileRepository(memory_enabled=False)
+    service = AssessmentService(repository, profile_repository)
+    submission = await service.create_submission("user-1", AssessmentSubmissionCreate())
+    await service.upsert_answer(
+        "user-1", submission.id, "goal", AssessmentAnswerUpsert(value="ready")
+    )
+    result = await service.complete_submission("user-1", submission.id)
+
+    with pytest.raises(MemoryDisabledError):
+        await service.confirm_fact_candidate("user-1", submission.id, result.fact_candidates[0].id)
+
+
+@pytest.mark.asyncio
+async def test_admin_publish_changes_draft_template_to_published(service):
+    service.repository.template.status = "draft"
+    await service.review_template("template-1", "nutritionist-1", "approved")
+    template = await service.publish_template("template-1", "admin-1")
+
+    assert template.status == "published"
+    assert template.published_at is not None
+    assert template.published_by_user_id == "admin-1"
+
+
+@pytest.mark.asyncio
+async def test_nutritionist_can_review_template_and_record_rule_version(service):
+    review = await service.review_template("template-1", "nutritionist-1", "approved")
+
+    assert review.status == "approved"
+    assert review.reviewer_user_id == "nutritionist-1"
+    assert review.rule_version == "assessment-rules-v1"
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_publish_without_professional_review(service):
+    service.repository.template.status = "draft"
+
+    with pytest.raises(AssessmentValidationError, match="professional review required"):
+        await service.publish_template("template-1", "admin-1")
+
+
+@pytest.mark.asyncio
+async def test_rejected_professional_review_does_not_enable_publish(service):
+    service.repository.template.status = "draft"
+    await service.review_template("template-1", "nutritionist-1", "rejected")
+
+    with pytest.raises(AssessmentValidationError, match="professional review required"):
+        await service.publish_template("template-1", "admin-1")
+
+
+@pytest.mark.asyncio
+async def test_latest_rejected_review_invalidates_older_approval(service):
+    service.repository.template.status = "draft"
+    await service.review_template("template-1", "nutritionist-1", "approved")
+    await service.review_template("template-1", "nutritionist-1", "rejected")
+
+    with pytest.raises(AssessmentValidationError, match="professional review required"):
+        await service.publish_template("template-1", "admin-1")
+
+
+@pytest.mark.asyncio
+async def test_repeated_professional_reviews_are_recorded_without_overwriting_history(service):
+    first = await service.review_template("template-1", "nutritionist-1", "rejected")
+    second = await service.review_template("template-1", "nutritionist-1", "approved")
+
+    assert first.id != second.id
+    assert len(service.repository.reviews) == 2

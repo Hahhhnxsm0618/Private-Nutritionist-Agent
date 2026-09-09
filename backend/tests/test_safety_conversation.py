@@ -30,6 +30,19 @@ class FakeRepository:
         conversation = self.conversations.get(conversation_id)
         return conversation if conversation and conversation.user_id == user_id else None
 
+    async def list_messages_by_request_id(self, user_id, conversation_id, request_id):
+        return [
+            message
+            for message in self.messages.values()
+            if message.user_id == user_id
+            and message.conversation_id == conversation_id
+            and message.request_id == request_id
+        ]
+
+    async def get_message(self, user_id, conversation_id, message_id):
+        message = self.messages.get(message_id)
+        return message if message and message.user_id == user_id and message.conversation_id == conversation_id else None
+
     async def create_message(
         self, user_id, conversation_id, role, content, status, request_id, now
     ):
@@ -52,6 +65,10 @@ class FakeRepository:
 
     async def touch_conversation(self, conversation, now):
         conversation.last_active_at = now
+
+    async def update_message_status(self, message, status):
+        message.status = status
+        return message
 
     async def create_safety_event(
         self, user_id, conversation_id, message_id, decision, request_id, trace_id, now
@@ -93,7 +110,7 @@ async def test_high_risk_message_persists_fixed_safe_reply_and_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_low_risk_message_remains_pending_without_assistant_reply() -> None:
+async def test_low_risk_message_generates_mock_assistant_reply() -> None:
     repository = FakeRepository()
     service = ConversationService(repository)
     conversation = await service.create_conversation("user-1", ConversationCreate())
@@ -106,6 +123,7 @@ async def test_low_risk_message_remains_pending_without_assistant_reply() -> Non
     )
 
     assert result.safety.risk_level is RiskLevel.LOW
-    assert result.user_message.status == "pending"
-    assert result.assistant_message is None
+    assert result.user_message.status == "succeeded"
+    assert result.assistant_message.status == "succeeded"
+    assert "Mock Agent" in result.assistant_message.content
     assert repository.events[0]["risk_level"] == "low"

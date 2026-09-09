@@ -88,3 +88,34 @@ class AssessmentOnboardingResponse(BaseModel):
     has_completed_quick: bool
     active_submission_id: str | None
     available_tiers: list[AssessmentTier]
+
+
+class AssessmentTemplateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    code: str
+    version: str
+    status: str
+    target_population: str
+    rule_version: str
+    published_at: datetime | None
+    published_by_user_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssessmentReviewRequest(BaseModel):
+    status: Literal["approved", "rejected"]
+
+
+class AssessmentReviewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    template_id: str
+    reviewer_user_id: str
+    status: str
+    rule_version: str
+    reviewed_at: datetime
+    created_at: datetime

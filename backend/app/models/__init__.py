@@ -6,6 +6,7 @@ from app.models.assessment import (
     AssessmentSubmission,
     AssessmentTemplate,
 )
+from app.models.assessment_review import AssessmentReview
 from app.models.audit import AuditLog
 from app.models.conversation import Conversation, Message
 from app.models.profile import Consent, HealthFact, HealthProfile
@@ -16,6 +17,7 @@ __all__ = [
     "AssessmentAnswer",
     "AssessmentFactCandidate",
     "AssessmentQuestion",
+    "AssessmentReview",
     "AssessmentSubmission",
     "AssessmentTemplate",
     "AuditLog",

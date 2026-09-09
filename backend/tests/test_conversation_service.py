@@ -42,6 +42,19 @@ class FakeRepository:
         conversation = self.conversations.get(conversation_id)
         return conversation if conversation and conversation.user_id == user_id else None
 
+    async def get_message(self, user_id, conversation_id, message_id):
+        message = self.messages.get(message_id)
+        return message if message and message.user_id == user_id and message.conversation_id == conversation_id else None
+
+    async def list_messages_by_request_id(self, user_id, conversation_id, request_id):
+        return [
+            message
+            for message in self.messages.values()
+            if message.user_id == user_id
+            and message.conversation_id == conversation_id
+            and message.request_id == request_id
+        ]
+
     async def archive_conversation(self, conversation, now):
         conversation.status = "archived"
         conversation.updated_at = now
@@ -93,6 +106,16 @@ class FakeRepository:
         conversation.last_active_at = now
         conversation.updated_at = now
 
+    async def update_message_status(self, message, status):
+        message.status = status
+        return message
+
+    async def update_message_content(self, message, content, status=None):
+        message.content = content
+        if status is not None:
+            message.status = status
+        return message
+
     async def commit(self):
         return None
 
@@ -122,10 +145,86 @@ async def test_user_message_is_persisted_and_touches_conversation(service):
     )
 
     assert result.user_message.role == "user"
-    assert result.user_message.status == "pending"
+    assert result.user_message.status == "succeeded"
     assert result.user_message.conversation_id == conversation.id
-    assert result.assistant_message is None
+    assert result.assistant_message.status == "succeeded"
+    assert "Mock Agent" in result.assistant_message.content
     assert result.safety.risk_level.value == "low"
+
+
+@pytest.mark.asyncio
+async def test_repeated_request_id_reuses_the_existing_turn(service):
+    conversation = await service.create_conversation("user-1", ConversationCreate())
+    request = MessageCreate(content="我早餐吃什么？")
+
+    first = await service.create_user_message("user-1", conversation.id, request, "request-1")
+    repeated = await service.create_user_message("user-1", conversation.id, request, "request-1")
+
+    assert repeated.user_message.id == first.user_message.id
+    assert repeated.assistant_message.id == first.assistant_message.id
+    assert len(service.repository.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_failure_persists_failed_assistant_and_retry_reuses_user_message():
+    class FailingAgent:
+        async def generate(self, content, user_id, conversation_id):
+            raise RuntimeError("mock agent unavailable")
+
+    repository = FakeRepository()
+    service = ConversationService(repository, agent=FailingAgent())
+    conversation = await service.create_conversation("user-1", ConversationCreate())
+    first = await service.create_user_message(
+        "user-1", conversation.id, MessageCreate(content="给我一个早餐建议"), "request-failed"
+    )
+
+    assert first.user_message.status == "succeeded"
+    assert first.assistant_message.status == "failed"
+
+    class WorkingAgent:
+        async def generate(self, content, user_id, conversation_id):
+            return "重试后的 Mock Agent 回复"
+
+    service.agent = WorkingAgent()
+    retried = await service.retry_user_message(
+        "user-1", conversation.id, first.user_message.id, "request-retry"
+    )
+
+    assert retried.user_message.id == first.user_message.id
+    assert retried.assistant_message.status == "succeeded"
+    assert retried.assistant_message.content == "重试后的 Mock Agent 回复"
+    assert len([m for m in repository.messages.values() if m.role == "user"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_message_persists_chunks_and_completes() -> None:
+    class StreamingAgent:
+        async def stream(self, content, user_id, conversation_id):
+            yield "第一段"
+            yield "第二段"
+
+    repository = FakeRepository()
+    service = ConversationService(repository, agent=StreamingAgent())
+    conversation = await service.create_conversation("user-1", ConversationCreate())
+
+    events = [
+        event
+        async for event in service.stream_user_message(
+            "user-1",
+            conversation.id,
+            MessageCreate(content="帮我安排早餐"),
+            "stream-1",
+        )
+    ]
+
+    assistant = next(message for message in repository.messages.values() if message.role == "assistant")
+    user_message = next(message for message in repository.messages.values() if message.role == "user")
+    assert any("event: delta" in event and "第一段" in event for event in events)
+    assert any("event: delta" in event and "第二段" in event for event in events)
+    assert assistant.content == "第一段第二段"
+    assert assistant.status == "succeeded"
+    assert user_message.status == "succeeded"
+    assert events[-1].startswith("event: done")
 
 
 @pytest.mark.asyncio
