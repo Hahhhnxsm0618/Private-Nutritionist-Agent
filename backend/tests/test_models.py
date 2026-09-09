@@ -1,0 +1,41 @@
+from app.models import Base
+
+EXPECTED_TABLES = {
+    # 这里锁定数据库基础层的表集合，防止模型被意外遗漏或重复注册。
+    "users",
+    "auth_sessions",
+    "health_profiles",
+    "health_facts",
+    "consents",
+    "conversations",
+    "messages",
+    "idempotency_keys",
+    "audit_logs",
+}
+
+
+def test_foundation_metadata_contains_expected_tables() -> None:
+    assert set(Base.metadata.tables) == EXPECTED_TABLES
+
+
+def test_user_owned_tables_have_user_id_and_primary_keys_are_strings() -> None:
+    """除用户主表外，业务数据都必须能按 user_id 做隔离。"""
+    for table_name in EXPECTED_TABLES - {"users"}:
+        table = Base.metadata.tables[table_name]
+        assert "user_id" in table.columns
+        assert table.primary_key.columns[0].type.length == 36
+
+
+def test_users_email_is_unique() -> None:
+    """登录标识必须由数据库保证唯一，而不只依赖业务代码检查。"""
+    users = Base.metadata.tables["users"]
+    email = users.columns["email"]
+
+    assert email.unique is True
+
+
+def test_metadata_has_no_delete_cascade_foreign_keys() -> None:
+    """删除策略由业务流程控制，避免级联误删健康和审计数据。"""
+    for table in Base.metadata.tables.values():
+        for foreign_key in table.foreign_keys:
+            assert foreign_key.ondelete != "CASCADE"
