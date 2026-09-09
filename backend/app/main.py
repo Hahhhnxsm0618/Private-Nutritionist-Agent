@@ -8,7 +8,10 @@
 
 from fastapi import FastAPI
 
+from app.assessment.router import router as assessment_router
 from app.auth.router import router as auth_router
+from app.conversation.router import router as conversation_router
+from app.profile.router import router as profile_router
 
 # 创建 FastAPI 应用实例。
 #
@@ -16,6 +19,9 @@ from app.auth.router import router as auth_router
 # 运维人员通过接口确认当前运行的是哪个版本。
 app = FastAPI(title="Nutrition Agent API", version="0.1.0")
 app.include_router(auth_router)
+app.include_router(assessment_router)
+app.include_router(profile_router)
+app.include_router(conversation_router)
 
 
 @app.get("/health")
